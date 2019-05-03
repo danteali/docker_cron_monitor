@@ -14,7 +14,7 @@ avoid bombarding with repeated alerts. Another notification will be sent when th
 will detail the length of time the container was down.
 
 Save script in location of your choice and make 'crontab_monitor.watchlist' containing list of container names to monitor. One 
-container nane per line.
+container name per line.
 
 And make these empty files in the same location:
 * `crontab_monitor.warn` - current set of 'warnings' i.e. container has been down for one instance of monitoring script but not yet two. 
