@@ -22,6 +22,8 @@ If the container is still down next time script runs an alert will be sent.
 * `crontab_monitor.alerts` - current set of alerts i.e. these containers have gone down and notifications have been sent.
 * `crontab_monitor.history` - will log a history or container status changes.
 
-The script send notoifications to Slack, email, and Pushbullet. It utilises [this Slack command line script](https://github.com/danteali/Slackomatic)
-, and [this Pushbullet script](https://gist.github.com/danteali/6cf4d91e29d5774a96720a35aff8b00e). If you want to send emails make 
+The script send notoifications to Slack, email, Pushbullet, and Pushover. It utilises [this Slack command line script](https://github.com/danteali/Slackomatic)
+, [this Pushbullet script](https://github.com/danteali/Pushbullet), and [this Pushover script](https://github.com/danteali/Pushover). If you want to send emails make 
 sure you already have your email ultility configured, the script uses `mutt` to send emails but you can easily swap it for `sendmail` etc.
+
+It can also (optionally) send data to Prometheus for display in Grafana via the NodeExporter tool.
