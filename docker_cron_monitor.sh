@@ -11,50 +11,71 @@
 # Check running as root - attempt to restart with sudo if not already running with root
     if [ $(id -u) -ne 0 ]; then tput setaf 1; echo "Not running as root, attempting to automatically restart script with root access..."; tput sgr0; echo; sudo $0 $*; exit 1; fi
 
+# Ignore terrible structure of the debugging code below! It was the easiest way 
+# of writing it so it wouldn't distract me too much from the rest of the code.
 
-# Script watches set of container names to alert if any are not running.
-# If container is not running it will initially be logged in the FIRST_WARN_FILE
-# to give a grace period in case a container is updating or restarting.
-# If it is still not running in the next check then an alert will be sent.
+# This script watches a set of container names (defined in WATCHLIST_FILE) to alert if any are not 
+# running. You should set this script to be run my crontab on the frequency that you need. I have it
+# running every ten minutes with this entry in crontab:
+# 0,10,20,30,40,50 * * * * /home/ryan/scripts/docker/monitoring/crontab_monitor/crontab_monitor.sh
+ 
+# If a container is not running, the first time it is identified as stopped by this script it will
+# be logged in the FIRST_WARN_FILE to give a grace period in case a container is updating or 
+# restarting.
+
+# If it is still not running in the next check then an alert will be sent. Therefore it takes two 
+# executions of this script to send out an alert so this needs to be taken into account when setting
+# the script run interval in crontab.
+
 # Only one alert will be sent to avoid bombarding with alerts.
-# Notification will also be sent of container resumes.
+# You can also set script to notify if container come back up.
 
-# Save script in location of your choice and make these empty files in the same location:
-# crontab_monitor.alerts - current set of alerts i.e. these containers have gone down and 
-#                          notifications have been sent.
-# crontab_monitor.warn - current set of 'warnings' i.e. container has been down for one
-#                        instance of monitoring script but not yet two. If container still
-#                        down next time script runs an alert will be sent.
-# crontab_monitor.history - will log a history or container status changes
-
-# Add script to crontab to run as frequently as you want to monitor your containers.
-# I run it every 10 mins:
-# 0,10,20,30,40,50 * * * * /path/to/script/docker_cron_monitor.sh
-
-
-# And make 'crontab_monitor.watchlist' containing list of containernames
-# to monitor. One container nane per line.
-
-# Utilises slack script from https://github.com/danteali/Slackomatic
-# for sending alerts.
-# And pushbullet script from https://gist.github.com/danteali/6cf4d91e29d5774a96720a35aff8b00e
-
-# Make sure you already have properly configured your email utilities.
-# This script uses 'mutt' to send email but you came substitute in
-# 'sendmail' or other email tool as needed.
-
-# Variables
+    # User Variables - some of these may need changed
+    # Don't edit WHEREAMI, it needs to be at the top since other vars use it.
     WHEREAMI="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-    WHOAMI=$(basename $0)
-    DATETIME=$(date +%Y%m%d-%H%M%S)
+    # Set path to email binary if you want to send email notifications.
+    # You should have configured the ability to send email separately and confirmed it works.
+    # This can be changed to something else if that's how you've set up email e.g. sendmail
     MAIL_BIN="/usr/bin/mutt"
-    EMAIL_ADDRESS="<your email here>"
-    # Files
+    EMAIL_ADDRESS="YOUR_EMAIL ADDRESS"
+    # Snapraid - only needed if you are using Snapraid and snapraid pauses some containers while it 
+    # runs. We will check whether snapraid is running and ignore the paused/stopped status of any
+    # containers which have been paused/stopped by snapraid so that we don't trigger warnings for
+    # intentional pauses. Leave the empty if you don't use snapraid.
+    SNAPRAID_SCRIPT="/home/ryan/scripts/snapraid/snapraid_script"
+    # Files - create these before first use in the same directory as this script.
     LOG_EXISTING_ALERTS="$WHEREAMI/crontab_monitor.alerts"
     LOG_FIRST_WARN="$WHEREAMI/crontab_monitor.warn"
     LOG_ALERT_HISTORY="$WHEREAMI/crontab_monitor.history"
+    # This file should list all the containers you wish to monitor
     WATCHLIST_FILE="$WHEREAMI/crontab_monitor.watchlist"
+    # Notification Switches - set 0/1 depending on which alerts you want to send.
+    # Notify on screen
+      SCREEN=1
+    # Send Pushbullet alerts - this calls my Pushbullet script which can be found here:
+    # https://github.com/danteali/Pushbullet
+      NOTIFY_PB=0
+    # Send Pushover alerts - this calls my Pushover script which can be found here:
+    # https://github.com/danteali/Pushover
+      NOTIFY_PO=1
+    # Send Slack alerts - this calls my Slack script which can be found here:
+    # https://github.com/danteali/Slackomatic
+      NOTIFY_SLACK=1
+    # Send email alerts
+      NOTIFY_EMAIL=0
+    # Send combined alert for all containers which have gone down
+      NOTIFY_SUMMARY=0
+    # Send individual alert for each container which goes down.
+      NOTIFY_EVERY_INSTANCE=1
+    # Update NodeExporter (used to push data into Prometheus for display in Grafana) - this calls 
+    # my NodeExporter script which can be found in the same path as this script.
+      NOTIFY_NODEXPLORER=1
+      NODEEXPORTER_PATH="$WHEREAMI/nodeexporter.sh"
+
     # Script variables
+    WHOAMI=$(basename $0)
+    DATETIME=$(date +%Y%m%d-%H%M%S)
+    #
     WATCHLIST=()
     #
     EXISTING_ALERT_FILE_ARRAY=()
@@ -62,6 +83,11 @@
     #
     FIRST_WARN_FILE_ARRAY=()
     FIRST_WARN_FILE_LIST=""
+    #
+    SNAPRAID_PS=""
+    SNAPRAID_STATUS="Stopped"
+    SNAPRAID_SERVICES=""
+    SNAPRAID_SERVICES_ARRAY=()
     #
     CONTAINER_STATUS_ARRAY=()
     CONTAINER_EXISTING_ALERT_FILE_ARRAY=()
@@ -83,17 +109,8 @@
     CONTINUING_ALERTS_ARRAY=()
     CONTINUING_ALERTS_STRING=""
     CONTINUING_ALERTS=0
-    # Notification Switches - Slack / Email / Pushbullet
-    # If you want to send anotification for each container that is down set NOTIFY_EVERY_INSTANCE=1 
-    # Set NOTIFY_SUMMARY=1 to send one notification consolidating all new alerts for downed containers
-    SCREEN=1
-    NOTIFY_PB=1
-    NOTIFY_SLACK=1
-    NOTIFY_EMAIL=1
-    NOTIFY_EVERY_INSTANCE=1
-    NOTIFY_SUMMARY=0
     # Print debug messages?
-    DEBUG=0
+    DEBUG=1
 
 
 
@@ -225,6 +242,80 @@ read -r -a FIRST_WARN_FILE_ARRAY <<< $FIRST_WARN_FILE_LIST
                                                                                                               echo
                                                                                                           fi
 
+
+
+# ======================================================================================================================================
+# SNAPRAID
+# ======================================================================================================================================
+# This section will only be executed snapraid is actually running. This will look in the snapraid_script set in the variables above to 
+# find the containers paused/stopped by snapraid and will exclude them from the watchlist so that we don't alert on intentionally 
+# stopped scripts.
+# If you don't use snapraid this section will be bypassed transparently.
+
+# If snapraid is running then exclude the containers which snapraid pauses from our watchlist
+# Check if snapraid running
+    SNAPRAID_PS=$(sudo ps -eo pid,etimes,etime,command | grep -e snapraid | grep -v "grep" | grep -v "SCREEN")
+    if [[ ! "$SNAPRAID_PS" == "" ]]; then
+        # Set status variable for printing in log
+            SNAPRAID_STATUS="Running"
+        # Get docker container list from snapraid script
+            SNAPRAID_SERVICES=$(grep "SERVICES='" $SNAPRAID_SCRIPT | grep -v "#" | sed -e "s/^  SERVICES='//" -e "s/'$//")
+        # Create new array from snapraid docker container list
+            read -r -a SNAPRAID_SERVICES_ARRAY <<< "$SNAPRAID_SERVICES"
+                                                                                                          if [[ $DEBUG == 1 ]]; then
+                                                                                                              echo "Debugging ++++++++++++++++++++++++++++++++++++++++++"
+                                                                                                              echo "SNAPRAID_SERVICES_ARRAY length = "${#SNAPRAID_SERVICES_ARRAY[@]}
+                                                                                                              echo "SNAPRAID_SERVICES_ARRAY array elements..."
+                                                                                                              #All elements on single line
+                                                                                                              #echo ${SNAPRAID_SERVICES_ARRAY[@]}
+                                                                                                              #All elements on new lines:
+                                                                                                              printf "%s\n" "${SNAPRAID_SERVICES_ARRAY[@]}"
+                                                                                                              echo "++++++++++++++++++++++++++++++++++++++++++++++++++++"
+                                                                                                              echo
+                                                                                                          fi
+        # Create new array by looping through watchlist and excluding anything in snapraid list
+        # We have to use this method since just removing elements from watchlist leaves empty spacess and retains same # of array elements
+        # If we have empty elements in watchlist then later 'docker inspect' will throw up errors if run against empty string.
+        # We could check later for empty elements in watchlist before running 'docker inspect' but I like a clean array.
+            for i in "${!WATCHLIST[@]}"; do
+                SNAPRAID_MATCH=0
+                for j in "${!SNAPRAID_SERVICES_ARRAY[@]}"; do
+                    # loop through snapraid array and if it matches watchlist then set flag
+                    if [[ "${WATCHLIST[i]}" == "${SNAPRAID_SERVICES_ARRAY[j]}" ]]; then
+                        SNAPRAID_MATCH=1
+                    fi
+                done
+                # if flag not set (no match between watchlist & snapraid) then add element to new array
+                if [[ $SNAPRAID_MATCH == 0 ]]; then
+                    TEMP_ARRAY+=("${WATCHLIST[i]}")
+                fi
+            done
+                                                                                                          if [[ $DEBUG == 1 ]]; then
+                                                                                                              echo "Debugging ++++++++++++++++++++++++++++++++++++++++++"
+                                                                                                              echo "Debugging: temp array length = "${#TEMP_ARRAY[@]}
+                                                                                                              echo "TEMP_ARRAY array elements..."
+                                                                                                              #All elements on single line
+                                                                                                              #echo ${TEMP_ARRAY[@]}
+                                                                                                              #All elements on new lines:
+                                                                                                              printf "%s\n" "${TEMP_ARRAY[@]}"
+                                                                                                              echo "++++++++++++++++++++++++++++++++++++++++++++++++++++"
+                                                                                                              echo
+                                                                                                          fi
+        # Set watchlist to equal temp array and delete temp array
+            WATCHLIST=("${TEMP_ARRAY[@]}")
+            unset TEMP_ARRAY
+                                                                                                          if [[ $DEBUG == 1 ]]; then
+                                                                                                              echo "Debugging ++++++++++++++++++++++++++++++++++++++++++"
+                                                                                                              echo "Debugging: WATCHLIST array length = "${#WATCHLIST[@]}
+                                                                                                              echo "WATCHLIST array elements..."
+                                                                                                              #All elements on single line
+                                                                                                              #echo ${WATCHLIST[@]}
+                                                                                                              #All elements on new lines:
+                                                                                                              printf "%s\n" "${WATCHLIST[@]}"
+                                                                                                              echo "++++++++++++++++++++++++++++++++++++++++++++++++++++"
+                                                                                                              echo
+                                                                                                          fi
+    fi
 
 
 
@@ -592,6 +683,12 @@ if [[ ! $NEW_ALERTS_STRING == "" ]] &&[[ $NOTIFY_EVERY_INSTANCE == 1 ]]; then
             PB_MSG="${NEW_ALERTS_ARRAY[i]} down @ `date`"
             pushbullet "$PB_SUBJECT" "$PB_MSG"
         fi
+        if [[ $NOTIFY_PO == 1 ]]; then
+            echo "CONTAINER DOWN - Sending Pushover notification for "${NEW_ALERTS_ARRAY[i]}
+            PO_TITLE="${NEW_ALERTS_ARRAY[i]} CONTAINER DOWN!!!"
+            PO_MSG="${NEW_ALERTS_ARRAY[i]} down @ `date`"
+            pushover -c "alert" -T "$PO_TITLE" "$PO_MSG"
+        fi
         if [[ $NOTIFY_SLACK == 1 ]]; then
             echo "CONTAINER DOWN - Sending Slack notification for "${NEW_ALERTS_ARRAY[i]}
             SLACK_SUBJECT="${NEW_ALERTS_ARRAY[i]} CONTAINER DOWN!!!"
@@ -615,12 +712,30 @@ if [[ ! $NEW_ALERTS_STRING == "" ]] && [[ $NOTIFY_SUMMARY == 1 ]]; then
         PB_MSG="$NEW_ALERTS_STRING down @ `date`"
         pushbullet "$PB_SUBJECT" "$PB_MSG"
     fi
+    if [[ $NOTIFY_PO == 1 ]]; then
+        echo "CONTAINERS DOWN - Sending summary Pushover notification - these containers stopped: $NEW_ALERTS_STRING"
+        PO_TITLE="CONTAINERS DOWN!!!"
+        PO_MSG="$NEW_ALERTS_STRING down @ `date`"
+        pushover -c "alert" -T "$PO_TITLE" "$PO_MSG"
+    fi
     if [[ $NOTIFY_SLACK == 1 ]]; then
         echo "CONTAINERS DOWN - Sending summary Slack notification for - these containers stopped: $NEW_ALERTS_STRING"
         SLACK_SUBJECT="CONTAINERS DOWN!!!"
         SLACK_TEXT="$NEW_ALERTS_STRING down @ `date`"
         slack -u "docker-crontab-monitor" -c "#alert" -T "$SLACK_SUBJECT" -t "$SLACK_TEXT" -e ":whale:" -C red
     fi
+    echo "-----------------------------------------------------"; echo
+fi
+
+# Send nodeexporter alert for new alerts (if flag set)
+#NodeExporter -> Prometheus (Arguments: $1 = action, $2 = storage, $3=1(start)/0(stop))
+if [[ ! $NEW_ALERTS_STRING == "" ]] && [[ $NOTIFY_NODEXPLORER == 1 ]]; then
+    echo "-----------------------------------------------------"
+    # Loop through new errors
+    for i in "${!NEW_ALERTS_ARRAY[@]}"; do
+        echo "Sending nodeexporter notification for containers down: "${NEW_ALERTS_ARRAY[i]}
+        $NODEEXPORTER_PATH docker_container_down $STORAGE ${NEW_ALERTS_ARRAY[i]} 1
+    done
     echo "-----------------------------------------------------"; echo
 fi
 
@@ -645,6 +760,12 @@ if [[ ! $CLEARED_ALERTS_STRING == "" ]] && [[ $NOTIFY_EVERY_INSTANCE == 1 ]]; th
             PB_MSG="${CLEARED_ALERTS_ARRAY[i]} up @ `date`. Container downtime: ${CLEARED_ALERTS_DURATION_SECS_PRETTY_ARRAY[i]}"
             pushbullet "$PB_SUBJECT" "$PB_MSG"
         fi
+        if [[ $NOTIFY_PO == 1 ]]; then
+            echo "CONTAINER UP - Sending Pushover notification for "${CLEARED_ALERTS_ARRAY[i]}
+            PO_TITLE="${CLEARED_ALERTS_ARRAY[i]} CONTAINER UP!!!"
+            PO_MSG="${CLEARED_ALERTS_ARRAY[i]} up @ `date`. Container downtime: ${CLEARED_ALERTS_DURATION_SECS_PRETTY_ARRAY[i]}"
+            pushover -c "alert" -T "$PO_TITLE" "$PO_MSG"
+        fi
         if [[ $NOTIFY_SLACK == 1 ]]; then
             echo "CONTAINER UP - Sending Slack notification for "${CLEARED_ALERTS_ARRAY[i]}
             SLACK_SUBJECT="${CLEARED_ALERTS_ARRAY[i]} CONTAINER UP!!!"
@@ -654,6 +775,7 @@ if [[ ! $CLEARED_ALERTS_STRING == "" ]] && [[ $NOTIFY_EVERY_INSTANCE == 1 ]]; th
     done
     echo "-----------------------------------------------------"; echo
 fi
+
 
 # Send summary cleared notifications if CLEARED_ALERTS_STRING string not empty (if flag set)
 if [[ ! $CLEARED_ALERTS_STRING == "" ]] && [[ $NOTIFY_SUMMARY == 1 ]]; then
@@ -668,6 +790,12 @@ if [[ ! $CLEARED_ALERTS_STRING == "" ]] && [[ $NOTIFY_SUMMARY == 1 ]]; then
         PB_MSG="$CLEARED_ALERTS_STRING up @ `date`"
         pushbullet "$PB_SUBJECT" "$PB_MSG"
     fi
+    if [[ $NOTIFY_PO == 1 ]]; then
+        echo "CONTAINERS UP - Sending summary Pushover notification - these containers back up: $CLEARED_ALERTS_STRING"
+        PO_TITLE="CONTAINERS UP!!!"
+        PO_MSG="$CLEARED_ALERTS_STRING up @ `date`"
+        pushbullet "$PB_SUBJECT" "$PB_MSG"
+    fi
     if [[ $NOTIFY_SLACK == 1 ]]; then
         echo "CONTAINERS UP - Sending summary Slack notification for - these containers back up: $CLEARED_ALERTS_STRING"
         SLACK_SUBJECT="CONTAINERS UP!!!"
@@ -676,6 +804,20 @@ if [[ ! $CLEARED_ALERTS_STRING == "" ]] && [[ $NOTIFY_SUMMARY == 1 ]]; then
     fi
     echo "-----------------------------------------------------"; echo
 fi
+
+
+# Send nodeexporter alert for cleared alerts (if flag set)
+#NodeExporter -> Prometheus (Arguments: $1 = action, $2 = storage, $3=1(start)/0(stop))
+if [[ ! $CLEARED_ALERTS_STRING == "" ]] && [[ $NOTIFY_NODEXPLORER == 1 ]]; then
+    echo "-----------------------------------------------------"
+    # loop through cleared errors
+    for i in "${!CLEARED_ALERTS_ARRAY[@]}"; do
+        echo "Sending nodeexporter notification for container back up: "${CLEARED_ALERTS_ARRAY[i]}
+        $NODEEXPORTER_PATH docker_container_down $STORAGE ${CLEARED_ALERTS_ARRAY[i]} 0
+    done
+    echo "-----------------------------------------------------"; echo
+fi
+
 
 
 # ======================================================================================================================================
@@ -728,4 +870,5 @@ cat $LOG_ALERT_HISTORY
 
 
 echo; echo
+
 
